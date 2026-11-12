@@ -7,3 +7,231 @@ datasource db {
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
+
+enum UserRole {
+  USER
+  ADMIN
+
+  @@map("user_role")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+
+  @@map("user_status")
+}
+
+enum WalletStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+
+  @@map("wallet_status")
+}
+
+enum LedgerAccountType {
+  USER_WALLET
+  SYSTEM
+
+  @@map("ledger_account_type")
+}
+
+enum LedgerTransactionType {
+  TOP_UP
+  TRANSFER
+  REFUND
+  ADJUSTMENT
+
+  @@map("ledger_transaction_type")
+}
+
+enum EntryDirection {
+  DEBIT
+  CREDIT
+
+  @@map("entry_direction")
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+
+  @@map("payment_status")
+}
+
+enum RefundStatus {
+  PENDING
+  COMPLETED
+  FAILED
+
+  @@map("refund_status")
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+
+  @@map("idempotency_status")
+}
+
+model User {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String     @unique @db.VarChar(255)
+  passwordHash String     @map("password_hash")
+  fullName     String     @map("full_name") @db.VarChar(120)
+  role         UserRole   @default(USER)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  wallet             Wallet?
+  initiatedPayments  Payment[]
+  initiatedRefunds   Refund[]
+  idempotencyRecords IdempotencyRecord[]
+
+  @@map("users")
+}
+
+model Wallet {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String       @unique @map("user_id") @db.Uuid
+  ledgerAccountId String       @unique @map("ledger_account_id") @db.Uuid
+  status          WalletStatus @default(ACTIVE)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user             User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  ledgerAccount    LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+  sentPayments     Payment[]     @relation("PaymentSender")
+  receivedPayments Payment[]     @relation("PaymentReceiver")
+
+  @@map("wallets")
+}
+
+model LedgerAccount {
+  id        String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type      LedgerAccountType
+  code      String?           @unique @db.VarChar(64)
+  balance   BigInt            @default(0)
+  lastSeq   BigInt            @default(0) @map("last_seq")
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3) // ← FIX: audit when balance changed
+
+  wallet  Wallet?
+  entries LedgerEntry[]
+
+  @@map("ledger_accounts")
+}
+
+model LedgerTransaction {
+  id          String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reference   String                @unique @db.VarChar(64)
+  type        LedgerTransactionType
+  description String?               @db.VarChar(255)
+  createdAt   DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entries LedgerEntry[]
+  payment Payment?
+  refund  Refund?
+
+  @@map("ledger_transactions")
+}
+
+model LedgerEntry {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  transactionId String         @map("transaction_id") @db.Uuid
+  accountId     String         @map("account_id") @db.Uuid
+  direction     EntryDirection
+  amount        BigInt
+  accountSeq    BigInt         @map("account_seq")
+  balanceAfter  BigInt         @map("balance_after")
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transaction LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  account     LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([transactionId, accountId])   // ← FIX: no duplicate account within one transaction
+  @@unique([accountId, accountSeq])      // sequence integrity per account
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+model Payment {
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reference           String        @unique @db.VarChar(64)
+  senderWalletId      String        @map("sender_wallet_id") @db.Uuid
+  receiverWalletId    String        @map("receiver_wallet_id") @db.Uuid
+  initiatedByUserId   String        @map("initiated_by_user_id") @db.Uuid
+  amount              BigInt
+  refundedAmount      BigInt        @default(0) @map("refunded_amount")
+  status              PaymentStatus @default(PENDING)
+  failureCode         String?       @map("failure_code") @db.VarChar(64)
+  failureMessage      String?       @map("failure_message") @db.VarChar(255)
+  // ← FIX: idempotencyKey removed from Payment — use IdempotencyRecord as single source of truth
+  ledgerTransactionId String?       @unique @map("ledger_transaction_id") @db.Uuid
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  completedAt         DateTime?     @map("completed_at") @db.Timestamptz(3)
+
+  senderWallet      Wallet             @relation("PaymentSender", fields: [senderWalletId], references: [id], onDelete: Restrict)
+  receiverWallet    Wallet             @relation("PaymentReceiver", fields: [receiverWalletId], references: [id], onDelete: Restrict)
+  initiatedBy       User               @relation(fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+  ledgerTransaction LedgerTransaction? @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  refunds           Refund[]
+
+  // ← FIX: removed @@unique([initiatedByUserId, idempotencyKey]) — moved to IdempotencyRecord
+  @@index([senderWalletId, createdAt(sort: Desc)])
+  @@index([receiverWalletId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model Refund {
+  id                  String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reference           String       @unique @db.VarChar(64)
+  paymentId           String       @map("payment_id") @db.Uuid
+  initiatedByUserId   String       @map("initiated_by_user_id") @db.Uuid
+  amount              BigInt
+  status              RefundStatus @default(PENDING)
+  reason              String?      @db.VarChar(255)
+  failureCode         String?      @map("failure_code") @db.VarChar(64)
+  // ← FIX: idempotencyKey removed from Refund — use IdempotencyRecord as single source of truth
+  ledgerTransactionId String?      @unique @map("ledger_transaction_id") @db.Uuid
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  completedAt         DateTime?    @map("completed_at") @db.Timestamptz(3)
+
+  payment           Payment            @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  initiatedBy       User               @relation(fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+  ledgerTransaction LedgerTransaction? @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+
+  // ← FIX: removed @@unique([initiatedByUserId, idempotencyKey]) — moved to IdempotencyRecord
+  @@index([paymentId])
+  @@map("refunds")
+}
+
+model IdempotencyRecord {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String            @map("user_id") @db.Uuid
+  key          String            @db.VarChar(255)
+  // ← FIX: scope key by operation so a Payment and Refund can't collide
+  //          values: "payment" | "refund" | "topup" | ...
+  scope        String            @default("payment") @db.VarChar(32)
+  requestHash  String            @map("request_hash") @db.VarChar(64)
+  status       IdempotencyStatus @default(IN_PROGRESS)
+  responseCode Int?              @map("response_code")
+  responseBody Json?             @map("response_body")
+  lockedAt     DateTime          @default(now()) @map("locked_at") @db.Timestamptz(3)
+  completedAt  DateTime?         @map("completed_at") @db.Timestamptz(3)  // ← FIX: distinguish "done" from "still running"
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt    DateTime          @map("expires_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, scope, key])          // ← FIX: namespace keys by operation
+  @@index([expiresAt])
+  @@index([status, expiresAt])             // ← FIX: fast lookup for cleanup job
+  @@map("idempotency_records")
+}

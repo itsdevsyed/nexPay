@@ -6,6 +6,11 @@ import helmet from 'helmet';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
+  // Allow JSON serialization of BigInt values (Prisma BigInt columns)
+  (BigInt.prototype as any).toJSON = function () {
+    return this.toString();
+  };
+
   const app = await NestFactory.create(AppModule);
 
   app.use(helmet());
@@ -27,7 +32,7 @@ async function bootstrap() {
   SwaggerModule.setup('api', app, SwaggerModule.createDocument(app, swaggerConfig));
 
   const port = app.get(ConfigService).get<number>('PORT', 3000);
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0'); // <-- bind to all interfaces for Docker
 }
 
 void bootstrap();

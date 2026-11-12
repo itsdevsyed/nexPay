@@ -1,0 +1,66 @@
+services:
+  app:
+    build: .
+    container_name: nexuspay-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Note: inside Docker, host = service name (postgres), NOT localhost
+      DATABASE_URL: postgresql://nexus:nexus@postgres:5432/nexuspay
+      DIRECT_URL: postgresql://nexus:nexus@postgres:5432/nexuspay
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nest-net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexuspay-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
+      POSTGRES_DB: nexuspay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexuspay"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nest-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: nexuspay-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nest-net
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  nest-net:
+    driver: bridge
